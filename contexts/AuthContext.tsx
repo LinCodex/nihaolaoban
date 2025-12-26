@@ -2,6 +2,11 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { Session, User, AuthError, type PostgrestSingleResponse } from '@supabase/supabase-js';
 
+type GetSessionResponse = {
+  data: { session: Session | null };
+  error: AuthError | null;
+};
+
 interface Profile {
   id: string;
   email: string;
@@ -18,7 +23,7 @@ interface AuthContextType {
   user: User | null;
   profile: Profile | null;
   loading: boolean;
-  signUp: (email: string, password: string, metadata?: { full_name?: string; role?: string }) => Promise<{ error: AuthError | null }>;
+  signUp: (email: string, password: string, metadata?: { full_name?: string; role?: string; phone?: string }) => Promise<{ error: AuthError | null }>;
   signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: AuthError | null }>;
   signInWithGoogle: () => Promise<{ error: AuthError | null }>;
   signOut: () => Promise<{ error: AuthError | null }>;
@@ -32,9 +37,20 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // Initialize state from local storage where possible
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
+
+  // Initialize profile from local storage for instant render
+  const [profile, setProfile] = useState<Profile | null>(() => {
+    try {
+      const cached = localStorage.getItem('cached_profile');
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [loading, setLoading] = useState(true);
 
   const withTimeout = async <T,>(
@@ -61,24 +77,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const fetchProfile = async (userId: string) => {
     try {
-      const { data, error } = await withTimeout<PostgrestSingleResponse<Profile>>(
-        supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', userId)
-          .single(),
-        15000,
-        'Profile request timed out'
-      );
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
 
       if (error) {
         console.error('Error fetching profile:', error);
         return null;
       }
 
+      // Cache the fresh profile
+      if (data) {
+        localStorage.setItem('cached_profile', JSON.stringify(data));
+      }
+
       return data as Profile;
     } catch (err) {
       console.error('Unexpected error fetching profile:', err);
+      // Fallback to cache if network fails? No, we trust current state or cache already loaded.
       return null;
     }
   };
@@ -86,7 +104,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshProfile = async () => {
     if (user) {
       const profileData = await fetchProfile(user.id);
-      setProfile(profileData);
+      if (profileData) setProfile(profileData);
     }
   };
 
@@ -94,29 +112,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Get initial session
     (async () => {
       try {
-        type GetSessionResponse = Awaited<ReturnType<typeof supabase.auth.getSession>>;
-        const sessionRes = await withTimeout<GetSessionResponse>(
-          supabase.auth.getSession(),
-          15000,
-          'Session request timed out'
-        );
+        const sessionRes = await supabase.auth.getSession();
 
         const session = sessionRes.data.session;
         setSession(session);
         setUser(session?.user ?? null);
 
-        if (session?.user) {
-          const profileData = await fetchProfile(session.user.id);
-          setProfile(profileData);
-        } else {
+        // If no session found, clear profile cache
+        if (!session) {
+          localStorage.removeItem('cached_profile');
           setProfile(null);
         }
+
+        // Stop loading immediately
+        setLoading(false);
+
+        if (session?.user) {
+          // fetchProfile updates cache and returns data
+          fetchProfile(session.user.id).then(profileData => {
+            if (profileData) setProfile(profileData);
+          });
+        }
       } catch (err) {
-        console.error('Error getting initial session:', err);
+        console.warn('Initial session check failed or timed out:', err);
         setSession(null);
         setUser(null);
+        // Do not clear profile here immediately to avoid flash if it was just a timeout, 
+        // but arguably if session check failed we should be safe.
+        // Let's keep optimistic profile if we have it? No, security first.
         setProfile(null);
-      } finally {
         setLoading(false);
       }
     })();
@@ -124,21 +148,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       try {
         setSession(session);
         setUser(session?.user ?? null);
 
+        // Handle explicit sign out
+        if (event === 'SIGNED_OUT') {
+          localStorage.removeItem('cached_profile');
+          setProfile(null);
+        }
+
+        // If we get an auth change event, we should ensure loading is false
+        setLoading(false);
+
         if (session?.user) {
           const profileData = await fetchProfile(session.user.id);
-          setProfile(profileData);
-        } else {
+          if (profileData) setProfile(profileData);
+        } else if (!session) {
+          // Double check clear
           setProfile(null);
         }
       } catch (err) {
         console.error('Auth state change handling error:', err);
-      } finally {
-        setLoading(false);
       }
     });
 
@@ -148,23 +180,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signUp = async (
     email: string,
     password: string,
-    metadata?: { full_name?: string; role?: string }
+    metadata?: { full_name?: string; role?: string; phone?: string }
   ) => {
     try {
-      const { data, error } = await withTimeout(
-        supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
           data: {
             full_name: metadata?.full_name || email,
             role: metadata?.role || 'buyer',
+            phone: metadata?.phone,
           },
         },
-        }),
-        15000,
-        'Sign up request timed out'
-      );
+      });
 
       if (error) {
         console.error('Sign up error:', error);
@@ -180,14 +209,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signIn = async (email: string, password: string, rememberMe: boolean = true) => {
     try {
-      const { data, error } = await withTimeout(
-        supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
-        }),
-        15000,
-        'Sign in request timed out'
-      );
+      });
 
       if (error) {
         console.error('Sign in error:', error);
@@ -213,8 +238,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = async () => {
     try {
-      const { data, error } = await withTimeout(
-        supabase.auth.signInWithOAuth({
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
           redirectTo: `${window.location.origin}/`,
@@ -223,10 +247,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             prompt: 'consent',
           },
         },
-        }),
-        15000,
-        'Google sign in request timed out'
-      );
+      });
 
       if (error) {
         console.error('Google sign in error:', error);
@@ -241,26 +262,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signOut = async () => {
+    console.log('AuthContext: signOut called');
     try {
-      const { error } = await withTimeout(
-        supabase.auth.signOut(),
-        15000,
-        'Sign out request timed out'
-      );
-
-      if (error) {
-        console.error('Sign out error:', error);
-        return { error };
-      }
-
+      // 1. Immediate local cleanup (Optimistic UI)
       setSession(null);
       setUser(null);
       setProfile(null);
       localStorage.removeItem('rememberMe');
+      localStorage.removeItem('cached_profile');
+
+      // 2. Network cleanup (don't let it block UI)
+      const { error } = await supabase.auth.signOut();
+
+      if (error) {
+        console.error('Sign out error (background):', error);
+      }
 
       return { error: null };
     } catch (err) {
       console.error('Unexpected sign out error:', err);
+      // Ensure state is cleared even if unexpected error
+      setSession(null);
+      setUser(null);
+      setProfile(null);
+      localStorage.removeItem('rememberMe');
+      localStorage.removeItem('cached_profile');
       return { error: err as AuthError };
     }
   };
@@ -271,14 +297,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { error: { message: 'No user email found' } as AuthError };
       }
 
-      const { error } = await withTimeout(
-        supabase.auth.resend({
-          type: 'signup',
-          email: user.email,
-        }),
-        15000,
-        'Resend verification request timed out'
-      );
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: user.email,
+      });
 
       if (error) {
         console.error('Resend verification error:', error);
@@ -294,15 +316,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const verifyOtp = async (email: string, token: string) => {
     try {
-      const { data, error } = await withTimeout(
-        supabase.auth.verifyOtp({
-          email,
-          token,
-          type: 'email',
-        }),
-        15000,
-        'Verification request timed out'
-      );
+      const { data, error } = await supabase.auth.verifyOtp({
+        email,
+        token,
+        type: 'email',
+      });
 
       if (error) {
         console.error('OTP verification error:', error);
@@ -318,13 +336,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const resetPasswordRequest = async (email: string) => {
     try {
-      const { error } = await withTimeout(
-        supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/`,
-        }),
-        15000,
-        'Password reset email request timed out'
-      );
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/`,
+      });
 
       if (error) {
         console.error('Password reset request error:', error);
@@ -340,13 +354,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const resetPassword = async (newPassword: string) => {
     try {
-      const { error } = await withTimeout(
-        supabase.auth.updateUser({
-          password: newPassword,
-        }),
-        15000,
-        'Password update request timed out'
-      );
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
 
       if (error) {
         console.error('Password reset error:', error);

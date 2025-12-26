@@ -50,15 +50,16 @@ export interface BusinessContent {
 
 export interface Business extends BusinessContent {
   id: string;
+  ownerProfileId?: string;
   image: string;
   images?: string[];
-  
+
   price: number;
   downPayment?: number;
   category: 'Restaurant' | 'Beauty' | 'Other' | 'Retail' | 'Service';
   sellerType: 'Owner' | 'Agent' | 'Dealer';
   views: number;
-  
+
   // Financials
   grossRevenue: number;
   cashFlow: number;
@@ -84,11 +85,11 @@ export interface Business extends BusinessContent {
   rating: number; // Deal Health/Score
   status: 'active' | 'sold' | 'pending' | 'hidden';
   agent: Agent;
-  
+
   // New Fields
   isPopular?: boolean;
   createdAt?: Date;
-  
+
   // Map Data
   coordinates: [number, number]; // [longitude, latitude]
 
@@ -96,7 +97,7 @@ export interface Business extends BusinessContent {
   translations?: {
     zh?: BusinessContent;
   };
-  
+
   // Tags
   tags?: string[];
 }

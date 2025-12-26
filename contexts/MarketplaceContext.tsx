@@ -2,6 +2,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { Business, Broker, User, Log, Report, AdminMessage } from '../types';
 import { PROPERTIES, BROKERS } from '../constants';
+// Removing mock data imports
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from './AuthContext';
 
@@ -33,52 +34,51 @@ interface MarketplaceContextType {
   markMessageRead: (id: string) => void;
   sendSupportInquiry: (data: { name: string, email: string, role: string, subject: string, message: string }) => void;
   sendAnnouncement: (subject: string, message: string) => void;
+  incrementListingViews: (id: string) => void;
 }
 
 const MarketplaceContext = createContext<MarketplaceContextType | undefined>(undefined);
 
-// Mock Users Data
-const MOCK_USERS: User[] = [
-    { id: '1', name: 'John Buyer', email: 'john@example.com', role: 'buyer', joinedDate: new Date('2023-10-15'), status: 'active', phone: '+1 555-0101' },
-    { id: '2', name: 'Alice Seller', email: 'alice@business.com', role: 'seller', joinedDate: new Date('2023-11-02'), status: 'active', phone: '+1 555-0202' },
-    { id: '3', name: 'Bob Inactive', email: 'bob@spam.com', role: 'buyer', joinedDate: new Date('2023-09-20'), status: 'banned', phone: '+1 555-9999' },
-];
 
-// Mock Logs
-const MOCK_LOGS: Log[] = [
-    { id: '1', action: 'Listing Approved', user: 'Admin', role: 'admin', target: 'Prime Downtown Pizzeria', timestamp: new Date(Date.now() - 10000000) },
-    { id: '2', action: 'User Banned', user: 'Admin', role: 'admin', target: 'Spam Bot 3000', timestamp: new Date(Date.now() - 5000000) },
-    { id: '3', action: 'Listing Created', user: 'Alice Seller', role: 'seller', target: 'Nail Salon', timestamp: new Date(Date.now() - 2000000) },
-];
 
-// Mock Reports
-const MOCK_REPORTS: Report[] = [
-  { id: '1', targetId: '2', targetType: 'listing', reason: 'scam', description: 'Price seems too good to be true, asks for wire transfer.', reporter: 'John Buyer', status: 'pending', timestamp: new Date(Date.now() - 86400000) },
-  { id: '2', targetId: '3', targetType: 'user', reason: 'spam', description: 'Sending unsolicited messages.', reporter: 'Alice Seller', status: 'pending', timestamp: new Date(Date.now() - 172800000) },
-];
 
-// Mock Admin Messages
-const MOCK_ADMIN_MESSAGES: AdminMessage[] = [
-    { id: '1', sender: 'John Buyer', email: 'john@example.com', subject: 'Inquiry about Listing #123', content: 'Hi, I am interested in the restaurant in Fort Lee. Can I see the financials?', timestamp: new Date(Date.now() - 3600000), status: 'unread', type: 'inquiry' },
-    { id: '2', sender: 'Alice Seller', email: 'alice@business.com', subject: 'Technical Issue', content: 'I cannot upload photos to my listing. Please help.', timestamp: new Date(Date.now() - 7200000), status: 'read', type: 'support' },
-    { id: '3', sender: 'System', email: 'no-reply@system.com', subject: 'New User Registration', content: 'New user "David Lee" registered.', timestamp: new Date(Date.now() - 86400000), status: 'read', type: 'system' }
-];
+
+
 
 export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize state with constants as fallback
-  const [listings, setListings] = useState<Business[]>(PROPERTIES);
-  const [brokers, setBrokers] = useState<Broker[]>(BROKERS);
-  const [users, setUsers] = useState<User[]>(MOCK_USERS);
-  const [logs, setLogs] = useState<Log[]>(MOCK_LOGS);
-  const [reports, setReports] = useState<Report[]>(MOCK_REPORTS);
-  const [adminMessages, setAdminMessages] = useState<AdminMessage[]>(MOCK_ADMIN_MESSAGES);
+  // Initialize state with cached data if available
+  const [listings, setListings] = useState<Business[]>(() => {
+    if (typeof window !== 'undefined') {
+      const cached = localStorage.getItem('listings_cache');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          // Revive dates
+          return parsed.map((item: any) => ({
+            ...item,
+            createdAt: new Date(item.createdAt),
+            yearsEstablished: item.yearsEstablished // Keep raw number or calc dynamically? Logic in mapSupabaseToListing handles this for new fetches.
+            // Note: cached data might be slightly stale but acceptable for instant load
+          }));
+        } catch (e) {
+          console.error('Error parsing cached listings', e);
+        }
+      }
+    }
+    return [];
+  });
+  const [brokers, setBrokers] = useState<Broker[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+  const [logs, setLogs] = useState<Log[]>([]);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [adminMessages, setAdminMessages] = useState<AdminMessage[]>([]);
   const [isPostingEnabled, setIsPostingEnabled] = useState(true);
-  const [listingsLoading, setListingsLoading] = useState(false);
+  const [listingsLoading, setListingsLoading] = useState(listings.length === 0);
   const { user } = useAuth();
 
-  // Convert Supabase listing to Business type
   const mapSupabaseToListing = (row: any): Business => ({
     id: row.id,
+    ownerProfileId: row.owner_profile_id,
     title: row.title || '',
     description: row.description || '',
     location: row.location || '',
@@ -112,7 +112,9 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Fetch listings from Supabase
   const refreshListings = useCallback(async () => {
-    setListingsLoading(true);
+    // Only show loading if we had no data (first load ever)
+    if (listings.length === 0) setListingsLoading(true);
+
     try {
       const { data, error } = await supabase
         .from('listings')
@@ -121,16 +123,17 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
       if (error) {
         console.error('Error fetching listings:', error);
-        // Keep mock data as fallback
         return;
       }
 
       if (data && data.length > 0) {
         const mappedListings = data.map(mapSupabaseToListing);
         setListings(mappedListings);
+
+        // Update cache
+        localStorage.setItem('listings_cache', JSON.stringify(mappedListings));
       } else {
-        // No data in DB, keep mock data
-        console.log('No listings in database, using mock data');
+        console.log('No listings in database');
       }
     } catch (err) {
       console.error('Failed to fetch listings:', err);
@@ -145,15 +148,15 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [refreshListings]);
 
   const addLog = (action: string, user: string, role: Log['role'], target: string) => {
-      const newLog: Log = {
-          id: Date.now().toString(),
-          action,
-          user,
-          role,
-          target,
-          timestamp: new Date()
-      };
-      setLogs(prev => [newLog, ...prev]);
+    const newLog: Log = {
+      id: Date.now().toString(),
+      action,
+      user,
+      role,
+      target,
+      timestamp: new Date()
+    };
+    setLogs(prev => [newLog, ...prev]);
   };
 
   const addListing = async (listing: Business) => {
@@ -178,7 +181,8 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
           employees: listing.employees === 'N/A' ? null : parseInt(listing.employees),
           year_established: new Date().getFullYear() - listing.yearsEstablished,
           status: listing.status || 'pending',
-          featured: listing.isPopular || false
+          featured: listing.isPopular || false,
+          image_url: listing.image // Save image URL
         });
 
         if (error) {
@@ -193,12 +197,12 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const updateListing = async (id: string, updates: Partial<Business>) => {
     setListings(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
     const target = listings.find(l => l.id === id)?.title || 'Unknown Listing';
-    
+
     // Simplified logging for updates
     if (updates.status) {
-        addLog(`Status changed to ${updates.status}`, 'Admin', 'admin', target);
+      addLog(`Status changed to ${updates.status}`, 'Admin', 'admin', target);
     } else {
-        addLog('Updated Listing', 'Admin', 'admin', target);
+      addLog('Updated Listing', 'Admin', 'admin', target);
     }
 
     // Sync to Supabase
@@ -212,6 +216,7 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (updates.location) supabaseUpdates.location = updates.location;
         if (updates.grossRevenue) supabaseUpdates.revenue = updates.grossRevenue;
         if (updates.cashFlow) supabaseUpdates.profit = updates.cashFlow;
+        if (updates.image) supabaseUpdates.image_url = updates.image; // Update image URL
         supabaseUpdates.updated_at = new Date().toISOString();
 
         const { error } = await supabase
@@ -250,21 +255,158 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   };
 
-  const addBroker = (broker: Broker) => {
-    setBrokers(prev => [...prev, broker]);
-    addLog('Added Broker', 'Admin', 'admin', broker.name);
+  // Fetch brokers from Supabase
+  const refreshBrokers = useCallback(async () => {
+    console.log('refreshBrokers: Starting fetch...');
+    try {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Broker fetch timeout')), 10000)
+      );
+
+      const { data, error } = await Promise.race([
+        supabase.from('brokers').select('*').order('created_at', { ascending: false }),
+        timeoutPromise
+      ]) as any;
+
+      console.log('refreshBrokers: Result', { data, error });
+
+      if (error) {
+        console.error('Error fetching brokers:', error);
+        return;
+      }
+
+      if (data) {
+        const mappedBrokers: Broker[] = data.map((row: any) => ({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          phone: row.phone || '',
+          image: row.image || 'https://images.unsplash.com/photo-1560250097-0b93528c311a?q=80&w=400&fm=webp',
+          location: row.location || '',
+          description: row.description || '',
+          specialties: row.specialties || [],
+          languages: row.languages || ['English'],
+          experience: row.experience || 0,
+          status: row.status || 'active'
+        }));
+        console.log('refreshBrokers: Mapped brokers', mappedBrokers);
+        setBrokers(mappedBrokers);
+      }
+    } catch (err) {
+      console.error('Failed to fetch brokers:', err);
+    }
+  }, []);
+
+  // Load brokers on mount
+  useEffect(() => {
+    refreshBrokers();
+  }, [refreshBrokers]);
+
+  const addBroker = async (broker: Broker) => {
+    try {
+      let profileId = null;
+
+      // 1. Create auth user if password provided
+      if (broker.password) {
+        const { data: rpcData, error: rpcError } = await supabase.rpc('create_broker_user', {
+          email: broker.email,
+          password: broker.password,
+          full_name: broker.name
+        });
+
+        if (rpcError) {
+          console.error('Error creating broker user:', rpcError);
+          alert('Failed to create broker login: ' + rpcError.message);
+          return;
+        }
+
+        profileId = rpcData?.id;
+        console.log('Broker user created:', rpcData);
+      }
+
+      // 2. Insert broker into brokers table
+      const { data, error } = await supabase.from('brokers').insert({
+        profile_id: profileId,
+        name: broker.name,
+        email: broker.email,
+        phone: broker.phone,
+        image: broker.image,
+        location: broker.location,
+        description: broker.description,
+        specialties: broker.specialties,
+        languages: broker.languages,
+        experience: broker.experience,
+        status: broker.status || 'active'
+      }).select().single();
+
+      if (error) {
+        console.error('Error inserting broker:', error);
+        alert('Failed to save broker: ' + error.message);
+        return;
+      }
+
+      // 3. Update local UI
+      if (data) {
+        setBrokers(prev => [{ ...broker, id: data.id }, ...prev]);
+      }
+      addLog('Added Broker', 'Admin', 'admin', broker.name);
+    } catch (err) {
+      console.error('Unexpected error adding broker:', err);
+    }
   };
 
-  const updateBroker = (id: string, updates: Partial<Broker>) => {
+  const updateBroker = async (id: string, updates: Partial<Broker>) => {
+    // Optimistic update
     setBrokers(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
     const target = brokers.find(b => b.id === id)?.name || 'Unknown Broker';
     addLog('Updated Broker', 'Admin', 'admin', target);
+
+    // Sync to Supabase
+    try {
+      const supabaseUpdates: any = {};
+      if (updates.name) supabaseUpdates.name = updates.name;
+      if (updates.email) supabaseUpdates.email = updates.email;
+      if (updates.phone) supabaseUpdates.phone = updates.phone;
+      if (updates.image) supabaseUpdates.image = updates.image;
+      if (updates.location) supabaseUpdates.location = updates.location;
+      if (updates.description) supabaseUpdates.description = updates.description;
+      if (updates.specialties) supabaseUpdates.specialties = updates.specialties;
+      if (updates.languages) supabaseUpdates.languages = updates.languages;
+      if (updates.experience !== undefined) supabaseUpdates.experience = updates.experience;
+      if (updates.status) supabaseUpdates.status = updates.status;
+      supabaseUpdates.updated_at = new Date().toISOString();
+
+      const { error } = await supabase
+        .from('brokers')
+        .update(supabaseUpdates)
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error updating broker in Supabase:', error);
+      }
+    } catch (err) {
+      console.error('Failed to update broker:', err);
+    }
   };
 
-  const deleteBroker = (id: string) => {
+  const deleteBroker = async (id: string) => {
     const target = brokers.find(b => b.id === id)?.name || 'Unknown Broker';
     setBrokers(prev => prev.filter(item => item.id !== id));
     addLog('Deleted Broker', 'Admin', 'admin', target);
+
+    // Sync to Supabase
+    try {
+      const { error } = await supabase
+        .from('brokers')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error deleting broker from Supabase:', error);
+      }
+    } catch (err) {
+      console.error('Failed to delete broker:', err);
+    }
   };
 
   const getBrokerById = (id: string) => {
@@ -278,9 +420,9 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
   };
 
   const updateUser = (id: string, updates: Partial<User>) => {
-      setUsers(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
-      const target = users.find(u => u.id === id)?.name || 'Unknown User';
-      addLog('Updated User Profile', 'Admin', 'admin', target);
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
+    const target = users.find(u => u.id === id)?.name || 'Unknown User';
+    addLog('Updated User Profile', 'Admin', 'admin', target);
   }
 
   const updateUserStatus = (id: string, status: 'active' | 'banned') => {
@@ -290,54 +432,64 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
   };
 
   const addReport = (report: Report) => {
-      setReports(prev => [report, ...prev]);
-      const reporterUser = users.find(u => u.name === report.reporter);
-      const role = reporterUser ? reporterUser.role : 'system';
-      addLog('Report Filed', report.reporter, role, `${report.reason} on ${report.targetType}`);
+    setReports(prev => [report, ...prev]);
+    const reporterUser = users.find(u => u.name === report.reporter);
+    const role = reporterUser ? reporterUser.role : 'system';
+    addLog('Report Filed', report.reporter, role, `${report.reason} on ${report.targetType}`);
   };
 
   const resolveReport = (id: string, status: 'resolved' | 'dismissed') => {
-      setReports(prev => prev.map(r => r.id === id ? { ...r, status } : r));
-      addLog(`Report ${status}`, 'Admin', 'admin', `Report #${id}`);
+    setReports(prev => prev.map(r => r.id === id ? { ...r, status } : r));
+    addLog(`Report ${status}`, 'Admin', 'admin', `Report #${id}`);
   };
 
   const togglePostingEnabled = () => {
-      const newState = !isPostingEnabled;
-      setIsPostingEnabled(newState);
-      addLog(newState ? 'Enabled User Posting' : 'Disabled User Posting', 'Admin', 'admin', 'System Settings');
+    const newState = !isPostingEnabled;
+    setIsPostingEnabled(newState);
+    addLog(newState ? 'Enabled User Posting' : 'Disabled User Posting', 'Admin', 'admin', 'System Settings');
   };
 
   const sendMessage = (userId: string, message: string) => {
-      const target = users.find(u => u.id === userId)?.name || 'Unknown User';
-      addLog('Message Sent', 'Admin', 'admin', `To ${target}: ${message.substring(0, 20)}...`);
-      console.log(`Message sent to user ${userId}: ${message}`);
+    const target = users.find(u => u.id === userId)?.name || 'Unknown User';
+    addLog('Message Sent', 'Admin', 'admin', `To ${target}: ${message.substring(0, 20)}...`);
+    console.log(`Message sent to user ${userId}: ${message}`);
   };
 
   const markMessageRead = (id: string) => {
-      setAdminMessages(prev => prev.map(m => m.id === id ? { ...m, status: 'read' } : m));
+    setAdminMessages(prev => prev.map(m => m.id === id ? { ...m, status: 'read' } : m));
   };
 
   const sendSupportInquiry = (data: { name: string, email: string, role: string, subject: string, message: string }) => {
-      const newMessage: AdminMessage = {
-          id: Date.now().toString(),
-          sender: data.name,
-          email: data.email,
-          subject: `[${data.subject.toUpperCase()}] ${data.role}`,
-          content: data.message,
-          timestamp: new Date(),
-          status: 'unread',
-          type: 'support'
-      };
-      setAdminMessages(prev => [newMessage, ...prev]);
-      addLog('Support Inquiry', data.name, 'buyer', 'Support Form');
+    const newMessage: AdminMessage = {
+      id: Date.now().toString(),
+      sender: data.name,
+      email: data.email,
+      subject: `[${data.subject.toUpperCase()}] ${data.role}`,
+      content: data.message,
+      timestamp: new Date(),
+      status: 'unread',
+      type: 'support'
+    };
+    setAdminMessages(prev => [newMessage, ...prev]);
+    addLog('Support Inquiry', data.name, 'buyer', 'Support Form');
   };
 
   const sendAnnouncement = (subject: string, message: string) => {
-      const activeUsers = users.filter(u => u.status === 'active');
-      addLog('System Announcement', 'Admin', 'admin', `Sent to ${activeUsers.length} users: ${subject}`);
-      // In a real app, this would iterate activeUsers and create notification records
-      console.log(`Announcement sent to ${activeUsers.length} users: ${subject} - ${message}`);
+    const activeUsers = users.filter(u => u.status === 'active');
+    addLog('System Announcement', 'Admin', 'admin', `Sent to ${activeUsers.length} users: ${subject}`);
+    console.log(`Announcement sent to ${activeUsers.length} users: ${subject} - ${message}`);
   };
+
+  const incrementListingViews = useCallback((id: string) => {
+    setListings(prev => {
+      const updated = prev.map(l => l.id === id ? { ...l, views: (l.views || 0) + 1 } : l);
+      // Persist to cache immediately for instant updates on refresh
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('listings_cache', JSON.stringify(updated));
+      }
+      return updated;
+    });
+  }, []);
 
   return (
     <MarketplaceContext.Provider value={{
@@ -367,7 +519,8 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
       sendMessage,
       markMessageRead,
       sendSupportInquiry,
-      sendAnnouncement
+      sendAnnouncement,
+      incrementListingViews
     }}>
       {children}
     </MarketplaceContext.Provider>

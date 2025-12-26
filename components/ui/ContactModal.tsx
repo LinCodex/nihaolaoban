@@ -1,7 +1,8 @@
-
 import React, { useEffect, useState } from 'react';
 import { X, Check, Send } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
+// Supabase client import should be at top. Assuming it's available or need to import.
+import { supabase } from '../../lib/supabaseClient';
 
 interface ContactModalProps {
   isOpen: boolean;
@@ -9,16 +10,20 @@ interface ContactModalProps {
   propertyTitle?: string;
   context?: 'listing' | 'broker';
   isNDASigned?: boolean;
-  currentUser?: { name: string, email?: string } | null;
+  currentUser?: { name: string, email?: string, phone?: string } | null;
+  listingId?: string;
+  dealerId?: string;
 }
 
-export const ContactModal: React.FC<ContactModalProps> = ({ 
-    isOpen, 
-    onClose, 
-    propertyTitle, 
-    context = 'listing', 
-    isNDASigned = false,
-    currentUser = null
+export const ContactModal: React.FC<ContactModalProps> = ({
+  isOpen,
+  onClose,
+  propertyTitle,
+  context = 'listing',
+  isNDASigned = false,
+  currentUser = null,
+  listingId,
+  dealerId
 }) => {
   const [isSubmitted, setIsSubmitted] = useState(false);
   const { t } = useLanguage();
@@ -35,36 +40,70 @@ export const ContactModal: React.FC<ContactModalProps> = ({
     };
   }, [isOpen]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setTimeout(() => {
+    setIsLoading(true);
+
+    try {
+      const formData = new FormData(e.target as HTMLFormElement);
+      // If user is logged in, use their data. Otherwise read form.
+      const name = currentUser?.name || formData.get('name') as string;
+      const email = currentUser?.email || formData.get('email') as string;
+      const message = formData.get('message') as string;
+
+      const payload = {
+        listing_id: listingId,
+        dealer_profile_id: dealerId, // "dealer" can be owner or broker
+        guest_name: name,
+        guest_email: email,
+        message: message,
+        status: 'new',
+        // If user is logged in, optionally link their profile?
+        // The leads table schema has `buyer_profile_id`.
+        // We'll need to pass currentUserId separately if we want to link it.
+        // For now, let's stick to base fields.
+      };
+
+      const { error } = await supabase
+        .from('leads')
+        .insert([payload]);
+
+      if (error) throw error;
+
       setIsSubmitted(true);
       setTimeout(() => {
         onClose();
       }, 2000);
-    }, 1000);
+    } catch (err) {
+      console.error("Error submitting lead:", err);
+      alert(t('contact.error')); // Simple alert for now
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   if (!isOpen) return null;
 
   // Header Logic
   const getHeader = () => {
-      if (context === 'broker') return t('contact.brokerTitle');
-      return isNDASigned ? t('contact.inquiryTitle') : t('contact.title');
+    if (context === 'broker') return t('contact.brokerTitle');
+    return isNDASigned ? t('contact.inquiryTitle') : t('contact.title');
   };
 
   const getSubtitle = () => {
-      if (context === 'broker') return propertyTitle ? `${t('contact.brokerSubtitle')} ${propertyTitle}` : t('contact.brokerSubtitle');
-      if (isNDASigned) return t('contact.inquirySubtitle');
-      return propertyTitle ? `${t('contact.subtitle')} Ref: ${propertyTitle}` : t('contact.subtitle');
+    if (context === 'broker') return propertyTitle ? `${t('contact.brokerSubtitle')} ${propertyTitle}` : t('contact.brokerSubtitle');
+    if (isNDASigned) return t('contact.inquirySubtitle');
+    return propertyTitle ? `${t('contact.subtitle')} Ref: ${propertyTitle}` : t('contact.subtitle');
   };
 
   return (
     <div className="fixed inset-0 z-[3000] flex items-center justify-center px-4 animate-modal-fade">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      
+
       <div className="relative w-full max-w-md bg-white rounded-[2.5rem] p-8 shadow-2xl animate-modal-slide overflow-hidden">
-        <button 
+        <button
           onClick={onClose}
           className="absolute top-4 right-4 p-2 text-gray-400 hover:text-black transition-colors bg-gray-50 rounded-full"
           aria-label="Close"
@@ -86,45 +125,48 @@ export const ContactModal: React.FC<ContactModalProps> = ({
               {getHeader()}
             </h3>
             <p className="text-gray-500 mb-6 text-sm leading-relaxed">
-               {getSubtitle()}
+              {getSubtitle()}
             </p>
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-              
+
               {/* Only show Name/Email if user is NOT logged in */}
               {!currentUser && (
-                  <>
-                    <div>
-                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 ml-2">{t('contact.name')}</label>
-                        <input 
-                        type="text" 
-                        required
-                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 text-brand-black focus:outline-none focus:ring-2 focus:ring-black/5 transition-all placeholder:text-gray-400"
-                        placeholder="Boss Laoban"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 ml-2">{t('contact.email')}</label>
-                        <input 
-                        type="email" 
-                        required
-                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 text-brand-black focus:outline-none focus:ring-2 focus:ring-black/5 transition-all placeholder:text-gray-400"
-                        placeholder="boss@example.com"
-                        />
-                    </div>
-                  </>
+                <>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 ml-2">{t('contact.name')}</label>
+                    <input
+                      type="text"
+                      name="name"
+                      required
+                      className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 text-brand-black focus:outline-none focus:ring-2 focus:ring-black/5 transition-all placeholder:text-gray-400"
+                      placeholder="Boss Laoban"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 ml-2">{t('contact.email')}</label>
+                    <input
+                      type="email"
+                      name="email"
+                      required
+                      className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 text-brand-black focus:outline-none focus:ring-2 focus:ring-black/5 transition-all placeholder:text-gray-400"
+                      placeholder="boss@example.com"
+                    />
+                  </div>
+                </>
               )}
 
               {currentUser && (
-                  <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 mb-2">
-                      <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mb-1">Sending as</p>
-                      <p className="font-bold text-brand-black">{currentUser.name}</p>
-                  </div>
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 mb-2">
+                  <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mb-1">Sending as</p>
+                  <p className="font-bold text-brand-black">{currentUser.name}</p>
+                </div>
               )}
 
               <div>
                 <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 ml-2">{t('contact.message')}</label>
-                <textarea 
+                <textarea
+                  name="message"
                   required
                   rows={4}
                   className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 text-brand-black focus:outline-none focus:ring-2 focus:ring-black/5 transition-all resize-none placeholder:text-gray-400"
@@ -132,7 +174,7 @@ export const ContactModal: React.FC<ContactModalProps> = ({
                 />
               </div>
 
-              <button 
+              <button
                 type="submit"
                 className="mt-2 w-full bg-brand-black text-white py-5 rounded-[1.5rem] font-bold text-lg hover:bg-gray-900 transition-all hover:scale-[1.01] active:scale-95 shadow-xl shadow-black/10 flex items-center justify-center gap-3"
               >

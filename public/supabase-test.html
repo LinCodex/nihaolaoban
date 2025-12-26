@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Supabase Connection Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+
+<body>
+    <h1>Supabase Connection Test</h1>
+    <div id="status">Testing connection...</div>
+    <script>
+        const supabaseUrl = 'https://rwevvgnjjznqgqysegxq.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3ZXZ2Z25qanpucWdxeXNlZ3hxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1OTU1MzgsImV4cCI6MjA4MjE3MTUzOH0.QxVo70xKKJxKmxF45AYda012Bi64-BQ18DvCA2_twWo';
+
+        const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+
+        async function testConnection() {
+            const statusDiv = document.getElementById('status');
+
+            try {
+                statusDiv.innerHTML = 'Testing auth.getSession()...';
+                const start = Date.now();
+                const { data, error } = await supabase.auth.getSession();
+                const elapsed = Date.now() - start;
+
+                if (error) {
+                    statusDiv.innerHTML = '<span style="color:red">ERROR: ' + error.message + '</span>';
+                } else {
+                    statusDiv.innerHTML = '<span style="color:green">SUCCESS! Session check took ' + elapsed + 'ms. Session: ' + (data.session ? 'Active' : 'None') + '</span>';
+                }
+            } catch (e) {
+                statusDiv.innerHTML = '<span style="color:red">EXCEPTION: ' + e.message + '</span>';
+            }
+        }
+
+        testConnection();
+    </script>
+</body>
+
+</html>
