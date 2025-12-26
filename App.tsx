@@ -18,6 +18,7 @@ import { MarketplaceProvider, useMarketplace } from './contexts/MarketplaceConte
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { BrokerLogin } from './components/BrokerLogin';
 import { AdminLogin } from './components/AdminLogin';
+import { SupportChatButton } from './components/ui/SupportChatButton';
 
 // Lazy load components
 const ListingsView = React.lazy(() => import('./components/ListingsView').then(module => ({ default: module.ListingsView })));
@@ -517,6 +518,9 @@ const AppContent: React.FC = () => {
           window.history.replaceState(null, '', window.location.pathname);
         }}
       />
+
+      {/* Floating Support Chat Button - show on public pages */}
+      {!isAdminRoute && !isDealerRoute && <SupportChatButton />}
     </div>
   );
 };

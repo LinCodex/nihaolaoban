@@ -413,22 +413,108 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     return brokers.find(b => b.id === id);
   };
 
-  const deleteUser = (id: string) => {
+  // Fetch users from Supabase profiles table
+  const refreshUsers = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error fetching users:', error);
+        return;
+      }
+
+      if (data) {
+        const mappedUsers: User[] = data.map((row: any) => ({
+          id: row.id,
+          name: row.full_name || row.email?.split('@')[0] || 'Unknown',
+          email: row.email,
+          role: row.role === 'dealer' ? 'seller' : (row.role || 'buyer') as any,
+          joinedDate: new Date(row.created_at),
+          status: row.is_banned ? 'banned' : 'active',
+          phone: row.phone
+        }));
+        setUsers(mappedUsers);
+      }
+    } catch (err) {
+      console.error('Failed to fetch users:', err);
+    }
+  }, []);
+
+  // Load users on mount
+  useEffect(() => {
+    refreshUsers();
+  }, [refreshUsers]);
+
+  const deleteUser = async (id: string) => {
     const target = users.find(u => u.id === id)?.name || 'Unknown User';
     setUsers(prev => prev.filter(u => u.id !== id));
     addLog('Deleted User', 'Admin', 'admin', target);
+
+    // Note: Deleting from auth.users requires admin API, just remove from profiles
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error deleting user from Supabase:', error);
+      }
+    } catch (err) {
+      console.error('Failed to delete user:', err);
+    }
   };
 
-  const updateUser = (id: string, updates: Partial<User>) => {
+  const updateUser = async (id: string, updates: Partial<User>) => {
     setUsers(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
     const target = users.find(u => u.id === id)?.name || 'Unknown User';
     addLog('Updated User Profile', 'Admin', 'admin', target);
-  }
 
-  const updateUserStatus = (id: string, status: 'active' | 'banned') => {
+    // Sync to Supabase
+    try {
+      const supabaseUpdates: any = {};
+      if (updates.name) supabaseUpdates.full_name = updates.name;
+      if (updates.email) supabaseUpdates.email = updates.email;
+      if (updates.phone) supabaseUpdates.phone = updates.phone;
+      if (updates.role) {
+        supabaseUpdates.role = updates.role === 'seller' ? 'dealer' : updates.role;
+      }
+      supabaseUpdates.updated_at = new Date().toISOString();
+
+      const { error } = await supabase
+        .from('profiles')
+        .update(supabaseUpdates)
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error updating user in Supabase:', error);
+      }
+    } catch (err) {
+      console.error('Failed to update user:', err);
+    }
+  };
+
+  const updateUserStatus = async (id: string, status: 'active' | 'banned') => {
     const target = users.find(u => u.id === id)?.name || 'Unknown User';
     setUsers(prev => prev.map(u => u.id === id ? { ...u, status } : u));
     addLog(`Changed User Status to ${status}`, 'Admin', 'admin', target);
+
+    // Sync to Supabase
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ is_banned: status === 'banned', updated_at: new Date().toISOString() })
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error updating user status in Supabase:', error);
+      }
+    } catch (err) {
+      console.error('Failed to update user status:', err);
+    }
   };
 
   const addReport = (report: Report) => {
@@ -449,29 +535,152 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     addLog(newState ? 'Enabled User Posting' : 'Disabled User Posting', 'Admin', 'admin', 'System Settings');
   };
 
-  const sendMessage = (userId: string, message: string) => {
-    const target = users.find(u => u.id === userId)?.name || 'Unknown User';
-    addLog('Message Sent', 'Admin', 'admin', `To ${target}: ${message.substring(0, 20)}...`);
-    console.log(`Message sent to user ${userId}: ${message}`);
-  };
+  // Fetch admin messages from Supabase
+  const refreshAdminMessages = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('support_messages')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-  const markMessageRead = (id: string) => {
-    setAdminMessages(prev => prev.map(m => m.id === id ? { ...m, status: 'read' } : m));
-  };
+      if (error) {
+        console.error('Error fetching admin messages:', error);
+        return;
+      }
 
-  const sendSupportInquiry = (data: { name: string, email: string, role: string, subject: string, message: string }) => {
-    const newMessage: AdminMessage = {
-      id: Date.now().toString(),
-      sender: data.name,
-      email: data.email,
-      subject: `[${data.subject.toUpperCase()}] ${data.role}`,
-      content: data.message,
-      timestamp: new Date(),
-      status: 'unread',
-      type: 'support'
+      if (data) {
+        const mappedMessages: AdminMessage[] = data.map((row: any) => ({
+          id: row.id,
+          sender: row.sender_name,
+          email: row.sender_email,
+          subject: row.subject,
+          content: row.content,
+          timestamp: new Date(row.created_at),
+          status: row.status,
+          type: row.message_type
+        }));
+        setAdminMessages(mappedMessages);
+      }
+    } catch (err) {
+      console.error('Failed to fetch admin messages:', err);
+    }
+  }, []);
+
+  // Load admin messages on mount + set up realtime subscription
+  useEffect(() => {
+    refreshAdminMessages();
+
+    // Subscribe to realtime changes on support_messages table
+    const channel = supabase
+      .channel('support_messages_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'support_messages' },
+        (payload) => {
+          console.log('Realtime message update:', payload);
+
+          if (payload.eventType === 'INSERT') {
+            // Add new message to the top
+            const row = payload.new as any;
+            const newMessage: AdminMessage = {
+              id: row.id,
+              sender: row.sender_name,
+              email: row.sender_email,
+              subject: row.subject,
+              content: row.content,
+              timestamp: new Date(row.created_at),
+              status: row.status,
+              type: row.message_type
+            };
+            setAdminMessages(prev => [newMessage, ...prev]);
+          } else if (payload.eventType === 'UPDATE') {
+            // Update existing message
+            const row = payload.new as any;
+            setAdminMessages(prev => prev.map(m =>
+              m.id === row.id
+                ? { ...m, status: row.status, content: row.content }
+                : m
+            ));
+          } else if (payload.eventType === 'DELETE') {
+            // Remove deleted message
+            const row = payload.old as any;
+            setAdminMessages(prev => prev.filter(m => m.id !== row.id));
+          }
+        }
+      )
+      .subscribe();
+
+    // Cleanup subscription on unmount
+    return () => {
+      supabase.removeChannel(channel);
     };
-    setAdminMessages(prev => [newMessage, ...prev]);
-    addLog('Support Inquiry', data.name, 'buyer', 'Support Form');
+  }, [refreshAdminMessages]);
+
+  const sendMessage = async (userId: string, message: string) => {
+    const targetUser = users.find(u => u.id === userId);
+    const target = targetUser?.name || 'Unknown User';
+    addLog('Message Sent', 'Admin', 'admin', `To ${target}: ${message.substring(0, 20)}...`);
+
+    // Save message to Supabase
+    try {
+      const { error } = await supabase.from('support_messages').insert({
+        sender_name: 'Admin',
+        sender_email: 'admin@nihaolaoban.com',
+        subject: `Message from Admin`,
+        content: `To: ${target} (${targetUser?.email})\n\n${message}`,
+        message_type: 'system',
+        status: 'read' // Admin already saw it
+      });
+
+      if (error) {
+        console.error('Error saving admin message:', error);
+      }
+    } catch (err) {
+      console.error('Failed to save admin message:', err);
+    }
+  };
+
+  const markMessageRead = async (id: string) => {
+    // Optimistic update
+    setAdminMessages(prev => prev.map(m => m.id === id ? { ...m, status: 'read' } : m));
+
+    // Sync to Supabase
+    try {
+      const { error } = await supabase
+        .from('support_messages')
+        .update({ status: 'read', updated_at: new Date().toISOString() })
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error marking message read:', error);
+      }
+    } catch (err) {
+      console.error('Failed to mark message read:', err);
+    }
+  };
+
+  const sendSupportInquiry = async (data: { name: string, email: string, role: string, subject: string, message: string }) => {
+    // Insert to Supabase
+    try {
+      const { error } = await supabase.from('support_messages').insert({
+        sender_name: data.name,
+        sender_email: data.email,
+        subject: `[${data.subject.toUpperCase()}] ${data.role}`,
+        content: data.message,
+        message_type: 'support'
+      });
+
+      if (error) {
+        console.error('Error sending support inquiry:', error);
+        return;
+      }
+
+      // Refresh to see new message
+      refreshAdminMessages();
+      addLog('Support Inquiry', data.name, 'buyer', 'Support Form');
+    } catch (err) {
+      console.error('Failed to send support inquiry:', err);
+    }
   };
 
   const sendAnnouncement = (subject: string, message: string) => {
